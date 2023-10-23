@@ -1,4 +1,4 @@
-module github.com/dsociative/eq
+module github.com/dsociative/do
 
 go 1.21.3
 
