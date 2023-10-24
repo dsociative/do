@@ -1,9 +1,9 @@
 package do
 
 import (
+	"database/sql/driver"
 	"fmt"
 	"reflect"
-	"testing"
 
 	"log"
 
@@ -19,17 +19,53 @@ var (
 	strSliceConv = sliceConverter[string]("StrSlice")
 )
 
+func ValuerConv() cmp.Option {
+	return cmp.FilterValues(
+		func(x, y any) bool {
+			comparable := func(v interface{}) bool {
+				switch v.(type) {
+				case driver.Valuer:
+					return true
+				default:
+					return false
+				}
+			}
+			return comparable(x) && comparable(y)
+		},
+		cmp.Transformer(
+			"valuer",
+			func(i any) any {
+				switch v := i.(type) {
+				case driver.Valuer:
+					value, err := v.Value()
+					if err != nil {
+						log.Panicf("valuer error %v - %v", i, err)
+					}
+					return value
+				default:
+					return i
+				}
+			},
+		),
+	)
+}
+
 func pointerConverter[T any](name string) cmp.Option {
 	return cmp.FilterValues(func(x, y interface{}) bool {
-		comparable := func(v interface{}) bool {
+		comparable := func(v interface{}) (hasPointer bool, ok bool) {
 			switch v.(type) {
-			case *T, T:
-				return true
-			default:
-				return false
+			case *T:
+				hasPointer = true
+				ok = true
+				return
+			case T:
+				ok = true
 			}
+			return
 		}
-		return comparable(x) && comparable(y)
+		hasPtX, okX := comparable(x)
+		hasPtY, okY := comparable(y)
+		return (hasPtX || hasPtY) && (okX && okY)
 	},
 		cmp.Transformer(name, func(i interface{}) (noValue T) {
 			switch v := i.(type) {
@@ -52,6 +88,9 @@ func sliceConverter[T any](name string) cmp.Option {
 			log.Fatal("slice converter reflect nil")
 		}
 		comparable := func(v interface{}) bool {
+			if v == nil {
+				return false
+			}
 			return reflect.TypeOf(v).AssignableTo(t)
 		}
 		return comparable(x) && comparable(y)
@@ -66,13 +105,8 @@ func sliceConverter[T any](name string) cmp.Option {
 	)
 }
 
-func MapCmp(t *testing.T, expected, real interface{}, opts ...cmp.Option) {
-	opts = append(opts, ptInt64Conv, ptStringConv)
-	require.Empty(t, cmp.Diff(
-		structs.New(expected).Map(),
-		structs.New(real).Map(),
-		opts...,
-	))
+func CmpOnlyStructNames(s any) cmp.Option {
+	return CmpOnly(structs.Names(s)...)
 }
 
 func CmpOnly(fields ...string) cmp.Option {
@@ -136,7 +170,7 @@ func CmpKeyComparer[X any, Y any](field string, cmpFn func(X, Y) bool) cmp.Optio
 type RenameMap map[string]string
 
 func CmpRename(renameMap RenameMap) cmp.Option {
-	return cmp.Transformer("cmpRename", func(m Mapped) Mapped {
+	return cmp.Transformer("cmpRename", func(m Untyped) Untyped {
 		for f, newF := range renameMap {
 			field := Key(f)
 			newField := Key(newF)
@@ -155,12 +189,12 @@ func CmpRename(renameMap RenameMap) cmp.Option {
 }
 
 type Key string
-type Mapped map[Key]any
+type Untyped map[Key]any
 
 func SliceCmp[E any, R any](t require.TestingT, expected []E, real []R, opts ...cmp.Option) {
 	opts = append(opts, ptInt64Conv, ptStringConv)
 	var (
-		e, r []Mapped
+		e, r []Untyped
 	)
 	e = Map(expected, toMap[E])
 	r = Map(real, toMap[R])
@@ -180,10 +214,10 @@ func MappedCmpStrict[E any, R any](t require.TestingT, expectedIDField, realIDFi
 	require.Empty(t, cmp.Diff(e, r, opts...))
 }
 
-func toMapped[T any](idName string, items []T) (map[interface{}]Mapped, error) {
+func toMapped[T any](idName string, items []T) (map[interface{}]Untyped, error) {
 	values := Map(items, toMap[T])
 	idField := Key(idName)
-	m := map[interface{}]Mapped{}
+	m := map[interface{}]Untyped{}
 	for _, v := range values {
 		id, ok := v[idField]
 		if !ok {
@@ -213,10 +247,34 @@ func toString[T any](i interface{}) interface{} {
 	}
 }
 
-func toMap[V any](i V) Mapped {
-	m := Mapped{}
+func toMap[V any](i V) Untyped {
+	m := Untyped{}
 	for k, v := range structs.New(i).Map() {
 		m[Key(k)] = v
+	}
+	return m
+}
+
+type TestingT interface {
+	require.TestingT
+	Helper()
+}
+
+func UntypedCmp[E any, R any](t TestingT, expected E, real R, opts ...cmp.Option) {
+	t.Helper()
+	e := ToUntyped(expected)
+	r := ToUntyped(real)
+	require.Empty(t, cmp.Diff(e, r, opts...))
+}
+
+func ToUntyped[V any](i V) Untyped {
+	m := Untyped{}
+
+	v := reflect.ValueOf(i)
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Field(i)
+		a := f.Interface()
+		m[Key(v.Type().Field(i).Name)] = a
 	}
 	return m
 }
